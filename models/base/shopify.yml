@@ -1,8 +1,8 @@
 version: 2
 
 sources:
-  - name: shopify_raw
-    schema: shopify_raw
+  - name: shopify_raw_uk
+    schema: shopify_raw_uk
     tables:
       - name: order
         freshness: 
