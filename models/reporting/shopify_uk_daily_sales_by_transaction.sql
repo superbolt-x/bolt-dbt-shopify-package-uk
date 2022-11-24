@@ -1,5 +1,5 @@
 {{ config (
-    alias = target.database + '_shopify_daily_sales_by_transaction'
+    alias = target.database + '_shopify_uk_daily_sales_by_transaction'
 )}}
 
 WITH 
