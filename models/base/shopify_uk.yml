@@ -25,13 +25,13 @@ sources:
       - name: customer_tag
 
 models:
-  - name: shopify_orders_uk
+  - name: shopify_uk_orders
     columns:
       - name: unique_key
         tests:
           - unique
           - not_null
-  - name: shopify_line_items_uk
+  - name: shopify_uk_line_items
     columns:
       - name: unique_key
         tests:
