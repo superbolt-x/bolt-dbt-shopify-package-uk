@@ -46,7 +46,7 @@
 {%- set shop_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'shop') -%}
 
 WITH 
-    {% if var('currency') == 'USD' -%}
+    {% if var('sho_uk_currency') == 'USD' -%}
     shop_raw_data AS 
     ({{ dbt_utils.union_relations(relations = shop_raw_tables) }}),
         
@@ -56,7 +56,7 @@ WITH
     WHERE date <= current_date),
     {%- endif -%}
 
-    {%- set conversion_rate = 1 if var('currency') != 'USD' else 'conversion_rate' %}    
+    {%- set conversion_rate = 1 if var('sho_uk_currency') != 'USD' else 'conversion_rate' %}    
         
     order_line_raw_data AS 
     ({{ dbt_utils.union_relations(relations = order_line_raw_tables) }}),
@@ -141,7 +141,7 @@ SELECT
     order_line_id as unique_key
 FROM items 
 LEFT JOIN refund USING(order_line_id)
-{%- if var('currency') == 'USD' %}
+{%- if var('sho_uk_currency') == 'USD' %}
     LEFT JOIN orders USING (order_id)
     LEFT JOIN currency ON orders.processed_at::date = currency.date
 {%- endif %}
