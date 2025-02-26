@@ -1,16 +1,23 @@
 {%- set schema_name,
+        order_table_name, 
         refund_table_name,
         adjustment_table_name,
         line_refund_table_name,
         transaction_table_name,
         shop_table_name
         = 'shopify_raw_uk',
+        'order',
         'refund',
         'order_adjustment',
         'order_line_refund',
         'transaction',
         'shop' -%}
 
+{%- set order_selected_fields = [
+    "id",
+    "shipping_address_country_code"
+] -%}
+        
 {%- set refund_selected_fields = [
     "id",
     "order_id",
@@ -41,6 +48,7 @@
     "currency"
 ] -%}
 
+{%- set order_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order') -%}
 {%- set refund_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'refund') -%}
 {%- set adjustment_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_adjustment') -%}
 {%- set line_refund_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_line_refund') -%}
@@ -66,6 +74,20 @@ WITH
     LIMIT 1
     ),
 
+    order_raw_data AS 
+    ({{ dbt_utils.union_relations(relations = order_raw_tables) }}),
+
+    order_staging AS 
+    (SELECT 
+
+        {% for field in order_selected_fields -%}
+        {{ get_shopify_clean_field(order_table_name, field)}}
+        {%- if not loop.last %},{% endif %}
+        {% endfor %}
+
+    FROM order_raw_data
+    ),
+        
     refund_raw_data AS 
     ({{ dbt_utils.union_relations(relations = refund_raw_tables) }}),
 
@@ -153,6 +175,7 @@ WITH
         refund_id,
         refund_date,
         quantity_refund,
+        shipping_address_country_code,
         SUM(amount_discrepancy_refund::float/{{ conversion_rate }}::float) AS amount_discrepancy_refund,
         tax_amount_discrepancy_refund::float/{{ conversion_rate }}::float AS tax_amount_discrepancy_refund,
         SUM(amount_shipping_refund::float/{{ conversion_rate }}::float) AS amount_shipping_refund,
@@ -160,7 +183,8 @@ WITH
         subtotal_refund::float/{{ conversion_rate }}::float AS subtotal_refund,
         total_tax_refund::float/{{ conversion_rate }}::float AS total_tax_refund
     FROM refund_adjustment_line_refund
+    LEFT JOIN order_staging USING(order_id)
     {%- if var('sho_uk_currency') == 'USD' %}
     LEFT JOIN currency ON refund_adjustment_line_refund.refund_date::date = currency.date
     {%- endif %}
-    GROUP BY 1,2,3,4,6,9,10
+    GROUP BY 1,2,3,4,5,7,10,11
