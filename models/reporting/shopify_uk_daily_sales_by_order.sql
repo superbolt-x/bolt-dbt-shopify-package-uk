@@ -41,6 +41,7 @@ WITH giftcard_deduction AS
         total_tax,
         shipping_price,
         total_revenue,
+        total_revenue_usd,
         order_tags,
         order_name,
         email,
