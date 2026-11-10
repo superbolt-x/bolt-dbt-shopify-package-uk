@@ -1,16 +1,7 @@
 {%- set schema_name,
-        order_table_name,
         item_table_name, 
-        item_fund_table_name,
-        shop_table_name
-        = 'shopify_raw_uk', 'order', 'order_line', 'order_line_refund', 'shop' -%}
-
-{%- set order_selected_fields = [
-    "id",
-    "created_at",
-    "processed_at"
-] -%}
-        
+        item_fund_table_name
+        = 'shopify_raw_uk', 'order_line', 'order_line_refund' -%}
 {%- set item_selected_fields = [
     "order_id",
     "id",
@@ -26,69 +17,36 @@
     "fulfillment_status",
     "gift_card",
     "index"
-
 ] -%}
-
 {%- set item_refund_selected_fields = [
     "order_line_id",
     "refund_id",
     "quantity",
     "subtotal"
 ] -%}
-
-{%- set shop_selected_fields = [
-    "currency"
+{#- Fulfillment is only synced for some clients. Only wire it in when both raw tables exist. -#}
+{%- set fulfillment_selected_fields = [
+    "id",
+    "created_at",
+    "status"
 ] -%}
-
-{%- set order_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order') -%}
 {%- set order_line_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_line') -%}
-{%- set order_line_refund_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_line_refund') -%}
-{%- set shop_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'shop') -%}
-
-WITH 
-    {% if var('sho_uk_currency') == 'USD' -%}
-    shop_raw_data AS 
-    ({{ dbt_utils.union_relations(relations = shop_raw_tables) }}),
-        
-    currency AS
-    (SELECT date, conversion_rate
-    FROM shop_raw_data LEFT JOIN utilities.currency USING (currency)
-    WHERE date <= current_date),
-    {%- endif -%}
-
-    {%- set conversion_rate = 1 if var('sho_uk_currency') != 'USD' else 'conversion_rate' %}    
-        
-    order_line_raw_data AS 
+{%- set fulfillment_order_line_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'fulfillment_order_line') -%}
+{%- set fulfillment_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'fulfillment') -%}
+{%- set has_fulfillment = (fulfillment_order_line_raw_tables | length > 0) and (fulfillment_raw_tables | length > 0) -%}
+WITH order_line_raw_data AS 
     ({{ dbt_utils.union_relations(relations = order_line_raw_tables) }}),
-
-    order_raw_data AS 
-    ({{ dbt_utils.union_relations(relations = order_raw_tables) }}),
-
-    orders AS 
-    (SELECT 
-
-        {% for field in order_selected_fields -%}
-        {{ get_shopify_clean_field(order_table_name, field)}}
-        {%- if not loop.last %},{% endif %}
-        {% endfor %}
-
-    FROM order_raw_data
-    ),
-        
     items AS 
     (SELECT 
-
         {% for column in item_selected_fields -%}
-        {{ get_shopify_clean_field(item_table_name, column)}}
+        {{ shopify_fx_line_field(get_shopify_clean_field(item_table_name, column), column) }}
         {%- if not loop.last %},{% endif %}
         {% endfor %}
-
     FROM order_line_raw_data
+    {{ shopify_fx_join('ON fx.fx_order_id = order_line_raw_data.order_id') }}
     ),
-
     order_line_refund_raw_data AS 
-    ({{ dbt_utils.union_relations(relations = order_line_refund_raw_tables) }}),
-
+    ({{ get_shopify_refund_line_items() }}),
     refund_raw AS 
     (SELECT 
         
@@ -96,52 +54,54 @@ WITH
         {{ get_shopify_clean_field(item_fund_table_name, column)}}
         {%- if not loop.last %},{% endif %}
         {% endfor %}
-
     FROM order_line_refund_raw_data
     ),
-
-    refund AS 
-    (SELECT 
+    refund AS
+    (SELECT
         order_line_id,
         SUM(refund_quantity) as refund_quantity,
-        SUM(refund_subtotal) as refund_subtotal
+        SUM(refund_subtotal){{ shopify_fx_agg() }} as refund_subtotal
     FROM refund_raw
+    {%- if shopify_fx_enabled() %}
+    LEFT JOIN (SELECT id as order_line_id, order_id FROM order_line_raw_data) fx_line USING(order_line_id)
+    {{ shopify_fx_join('ON fx.fx_order_id = fx_line.order_id') }}
+    {%- endif %}
     GROUP BY order_line_id
     )
 
-{%- set item_fields = [
-    "order_line_id",
-    "order_id",
-    "product_id",
-    "variant_id",
-    "product_title",
-    "variant_title",
-    "item_title",    
-    "price",
-    "quantity",
-    "sku",
-    "fulfillable_quantity",
-    "fulfillment_status",
-    "gift_card",
-    "index",
-    "refund_quantity",
-    "refund_subtotal" 
-] -%}
-        
-SELECT 
-    {%- for field in item_fields -%}
-        {%- if ('price' in field or 'refund' in field) %}
-        "{{ field }}"::float/{{ conversion_rate }}::float as "{{ field }}",
-        {%- else %}
-        "{{ field }}",
-        {%- endif -%}
-    {%- endfor %}
+    {%- if has_fulfillment %}
+    ,fulfillment_order_line_raw_data AS
+    ({{ dbt_utils.union_relations(relations = fulfillment_order_line_raw_tables) }}),
+
+    fulfillment_raw_data AS
+    ({{ dbt_utils.union_relations(relations = fulfillment_raw_tables) }}),
+
+    fulfillment_staging AS
+    (SELECT
+        {% for field in fulfillment_selected_fields -%}
+        {{ get_shopify_clean_field('fulfillment', field) }}
+        {%- if not loop.last %},{% endif %}
+        {% endfor %}
+    FROM fulfillment_raw_data
+    ),
+
+    -- line-grain fulfillment date = first successful fulfillment containing that line
+    fulfillment_lines AS
+    (SELECT
+        fol.order_line_id,
+        MIN(CASE WHEN fs.status = 'success' THEN fs.created_at END)::date as fulfillment_date
+    FROM fulfillment_order_line_raw_data fol
+    JOIN fulfillment_staging fs ON fol.fulfillment_id = fs.id
+    GROUP BY 1
+    )
+    {%- endif %}
+
+SELECT *,
     quantity - refund_quantity as net_quantity,
     price * quantity - refund_subtotal as net_subtotal,
     order_line_id as unique_key
-FROM items 
+FROM items
 LEFT JOIN refund USING(order_line_id)
-{%- if var('sho_uk_currency') == 'USD' %}
-    LEFT JOIN orders USING (order_id)
-    LEFT JOIN currency ON orders.processed_at::date = currency.date
+{%- if has_fulfillment %}
+LEFT JOIN fulfillment_lines USING(order_line_id)
 {%- endif %}

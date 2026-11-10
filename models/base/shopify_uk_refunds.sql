@@ -3,15 +3,13 @@
         refund_table_name,
         adjustment_table_name,
         line_refund_table_name,
-        transaction_table_name,
-        shop_table_name
+        transaction_table_name
         = 'shopify_raw_uk',
         'order',
         'refund',
         'order_adjustment',
         'order_line_refund',
-        'transaction',
-        'shop' -%}
+        'transaction' -%}
 
 {%- set order_selected_fields = [
     "id",
@@ -43,30 +41,12 @@
     "subtotal",
     "total_tax"
 ] -%}
-
-{%- set shop_selected_fields = [
-    "currency"
-] -%}
-
+        
 {%- set order_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order') -%}
 {%- set refund_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'refund') -%}
 {%- set adjustment_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_adjustment') -%}
-{%- set line_refund_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'order_line_refund') -%}
-{%- set shop_raw_tables = dbt_utils.get_relations_by_pattern('shopify_raw_uk%', 'shop') -%}
 
 WITH 
-    {% if var('sho_uk_currency') == 'USD' -%}
-    shop_raw_data AS 
-    ({{ dbt_utils.union_relations(relations = shop_raw_tables) }}),
-        
-    currency AS
-    (SELECT date, conversion_rate
-    FROM shop_raw_data LEFT JOIN utilities.currency USING (currency)
-    WHERE date <= current_date),
-    {%- endif -%}
-
-    {%- set conversion_rate = 1 if var('sho_uk_currency') != 'USD' else 'conversion_rate' %}
-
     -- To tackle the signal loss between Fivetran and Shopify transformations
     stellar_signal AS 
     (SELECT _fivetran_synced
@@ -87,7 +67,7 @@ WITH
 
     FROM order_raw_data
     ),
-        
+
     refund_raw_data AS 
     ({{ dbt_utils.union_relations(relations = refund_raw_tables) }}),
 
@@ -117,7 +97,7 @@ WITH
     ),
 
     line_refund_raw_data AS 
-    ({{ dbt_utils.union_relations(relations = line_refund_raw_tables) }}),
+    ({{ get_shopify_refund_line_items() }}),
 
     line_refund_staging AS 
     (SELECT 
@@ -166,7 +146,7 @@ WITH
         COALESCE(total_tax_refund,0) AS total_tax_refund
         FROM refund_adjustment
         LEFT JOIN line_refund USING(refund_id)
-        --LEFT JOIN shopify_raw.order ON (order_id = id)
+        --LEFT JOIN shopify_raw_uk.order ON (order_id = id)
         --WHERE cancelled_at is null
     )
 
@@ -176,15 +156,15 @@ WITH
         refund_date,
         quantity_refund,
         shipping_address_country_code,
-        SUM(amount_discrepancy_refund::float/{{ conversion_rate }}::float) AS amount_discrepancy_refund,
-        tax_amount_discrepancy_refund::float/{{ conversion_rate }}::float AS tax_amount_discrepancy_refund,
-        SUM(amount_shipping_refund::float/{{ conversion_rate }}::float) AS amount_shipping_refund,
-        SUM(tax_amount_shipping_refund::float/{{ conversion_rate }}::float) AS tax_amount_shipping_refund,
-        subtotal_refund::float/{{ conversion_rate }}::float AS subtotal_refund,
-        total_tax_refund::float/{{ conversion_rate }}::float AS total_tax_refund
+        SUM(amount_discrepancy_refund){{ shopify_fx_agg() }} AS amount_discrepancy_refund,
+        tax_amount_discrepancy_refund{{ shopify_fx_agg() }} AS tax_amount_discrepancy_refund,
+        SUM(amount_shipping_refund){{ shopify_fx_agg() }} AS amount_shipping_refund,
+        SUM(tax_amount_shipping_refund){{ shopify_fx_agg() }} AS tax_amount_shipping_refund,
+        subtotal_refund{{ shopify_fx_agg() }} AS subtotal_refund,
+        total_tax_refund{{ shopify_fx_agg() }} AS total_tax_refund
     FROM refund_adjustment_line_refund
     LEFT JOIN order_staging USING(order_id)
-    {%- if var('sho_uk_currency') == 'USD' %}
-    LEFT JOIN currency ON refund_adjustment_line_refund.refund_date::date = currency.date
-    {%- endif %}
-    GROUP BY 1,2,3,4,5,7,10,11
+    {{ shopify_fx_join('ON fx.fx_order_id = refund_adjustment_line_refund.order_id') }}
+    GROUP BY refund_adjustment_line_refund.order_id, refund_adjustment_line_refund.refund_id, refund_adjustment_line_refund.refund_date,
+        refund_adjustment_line_refund.quantity_refund, order_staging.shipping_address_country_code,
+        refund_adjustment_line_refund.tax_amount_discrepancy_refund, refund_adjustment_line_refund.subtotal_refund, refund_adjustment_line_refund.total_tax_refund
